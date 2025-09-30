@@ -1,0 +1,19 @@
+[project]
+name = "Salary-slips"
+version = "0.1.0"
+description = "Default template for PDM package"
+authors = [
+    {name = "Sumsam Ali", email = "sumsam.ali@catalent.com"},
+]
+dependencies = ["pandas>=2.3.3", "pdfplumber>=0.11.7", "openpyxl>=3.1.5", "pymupdf4llm>=0.0.27"]
+requires-python = "==3.11.*"
+readme = "README.md"
+license = {text = "MIT"}
+
+
+[tool.pdm]
+distribution = false
+
+[tool.pdm.scripts]
+covert-to-excel = "python slips_to_excel.py"
+test = "python test.py"
