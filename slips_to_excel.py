@@ -1,8 +1,3 @@
-"""
-This script converts PDF files into Excel files with the extracted data.
-This script works with salary slip PDFs as input using pymupdf4llm for conversion.
-"""
-
 import logging
 import os
 import re
@@ -13,13 +8,15 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from pymupdf4llm import to_markdown
+from rich.console import Console
+from rich.logging import RichHandler
 
-# Configure logging - console only
+console = Console()
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format="%(message)s",
     handlers=[
-        logging.StreamHandler(),
+        RichHandler(console=console, rich_tracebacks=True),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -49,7 +46,6 @@ class SalarySlipExtractor:
         """
         if not value:
             return None
-        # Remove HTML breaks, pipes, and extra whitespace
         cleaned = re.sub(r"<br\s*/?>", " ", value)
         cleaned = cleaned.replace("|", "").strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
@@ -63,12 +59,9 @@ class SalarySlipExtractor:
         :param field_name: Field name to look for
         :return: Extracted value or None
         """
-        # Pattern for table rows like |Field Name|Value|
         pattern = rf"\|[*\s]*{re.escape(field_name)}[*\s]*\|([^|]+)\|"
         match = re.search(pattern, markdown_text, re.IGNORECASE)
-        if match:
-            return self.clean_value(match.group(1))
-        return None
+        return self.clean_value(match.group(1)) if match else None
 
     def extract_numeric_value(self, markdown_text: str, field_name: str) -> str:
         """
@@ -78,13 +71,25 @@ class SalarySlipExtractor:
         :param field_name: Field name to look for
         :return: Extracted numeric value or None
         """
-        # Look for the field name followed by a number with optional commas
-        pattern = rf"{re.escape(field_name)}\s*\|?\s*([\d,]+(?:\.\d{{2}})?)"
+        # Pattern to match field names with optional bold markers (**) and extract numeric values
+        # Handles both regular and bolded field names, with optional <br> tags
+        pattern = (
+            rf"\*{{0,2}}{re.escape(field_name)}\*{{0,2}}\s*\|?\s*([\d,]+(?:\.\d{{2}})?)"
+        )
         match = re.search(pattern, markdown_text, re.IGNORECASE)
-        if match:
-            value = match.group(1).strip()
-            return value if value else None
-        return None
+
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+
+        # Fallback: Try to find it in a table cell format (|**Field**|value|)
+        table_pattern = rf"\|\s*\*{{0,2}}{re.escape(field_name)}\*{{0,2}}\s*\|\s*([\d,]+(?:\.\d{{2}})?)"
+        table_match = re.search(table_pattern, markdown_text, re.IGNORECASE)
+
+        return (
+            table_match.group(1).strip()
+            if table_match and table_match.group(1).strip()
+            else None
+        )
 
     def extract_data_from_pdf(self, pdf_path: str) -> Dict[str, str]:
         """
@@ -114,16 +119,13 @@ class SalarySlipExtractor:
         }
 
         try:
-            # Convert PDF to markdown using pymupdf4llm
             markdown_text = to_markdown(pdf_path)
-
             if not markdown_text:
                 logger.warning("No text extracted from PDF: %s", pdf_path)
                 return data
 
             logger.debug("Extracted markdown length: %d characters", len(markdown_text))
 
-            # Extract basic information fields
             basic_fields = {
                 "Month": "Month of Salary",
                 "Employee Name": "Employee Name",
@@ -140,7 +142,6 @@ class SalarySlipExtractor:
                 else:
                     logger.warning("✗ Could not extract: %s", key)
 
-            # Extract numeric fields (Income and Deductions)
             numeric_fields = {
                 "Basic Salary": "Basic Salary",
                 "House Rent Allowance": "House Rent Allowance",
@@ -162,15 +163,12 @@ class SalarySlipExtractor:
                 else:
                     logger.warning("✗ Could not extract: %s", key)
 
-            # Special handling for fields that might be empty or '-'
-            # If Bonus shows as '-', set it to 0 or None
             for key in ["Bonus", "Fuel Reimbursements"]:
                 if data[key] == "-" or data[key] == "":
                     data[key] = "0"
 
-        except Exception as e:
+        except (FileNotFoundError, PermissionError, ValueError) as e:
             logger.error("Error processing PDF %s: %s", pdf_path, str(e), exc_info=True)
-
         return data
 
     def process_all_pdfs(self) -> None:
@@ -181,9 +179,14 @@ class SalarySlipExtractor:
         logger.info("Starting to process PDFs in folder: %s", self.pdf_folder)
         logger.info("=" * 60)
 
-        pdf_files = [
-            f for f in os.listdir(self.pdf_folder) if f.lower().endswith(".pdf")
-        ]
+        try:
+            pdf_files = [
+                f for f in os.listdir(self.pdf_folder) if f.lower().endswith(".pdf")
+            ]
+        except (FileNotFoundError, PermissionError) as e:
+            logger.error("Error accessing folder %s: %s", self.pdf_folder, str(e))
+            return
+
         pdf_count = len(pdf_files)
 
         if pdf_count == 0:
@@ -238,9 +241,7 @@ def add_totals_to_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     ]
 
     try:
-        # Convert numeric columns to float, handling non-numeric values
         for col in numeric_cols:
-            # Remove commas from numbers before conversion
             if col in df.columns:
                 df[col] = df[col].astype(str).str.replace(",", "").str.replace("-", "0")
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -259,7 +260,7 @@ def add_totals_to_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         logger.info("✅ Added total row to DataFrame")
         return result_df
 
-    except Exception as e:
+    except (ValueError, TypeError) as e:
         logger.error("Error adding totals to DataFrame: %s", str(e))
         raise
 
@@ -279,7 +280,6 @@ def save_to_pretty_excel(df: pd.DataFrame, output_path: str) -> None:
         workbook: Workbook = writer.book
         worksheet = workbook.active
 
-        # Define styles
         header_font = Font(bold=True, color="FFFFFF", size=11)
         header_fill = PatternFill(
             start_color="4F81BD", end_color="4F81BD", fill_type="solid"
@@ -296,14 +296,12 @@ def save_to_pretty_excel(df: pd.DataFrame, output_path: str) -> None:
             bottom=Side(style="thin"),
         )
 
-        # Apply header styles
         for cell in worksheet[1]:
             cell.font = header_font
             cell.fill = header_fill
             cell.alignment = alignment
             cell.border = thin_border
 
-        # Auto-adjust column widths
         for col in worksheet.columns:
             max_length = 0
             column = col[0].column_letter
@@ -313,12 +311,11 @@ def save_to_pretty_excel(df: pd.DataFrame, output_path: str) -> None:
                         cell_length = len(str(cell.value))
                         if cell_length > max_length:
                             max_length = cell_length
-                except:
+                except (TypeError, ValueError):
                     pass
-            adjusted_width = min(max_length + 2, 50)  # Cap at 50
+            adjusted_width = min(max_length + 2, 50)
             worksheet.column_dimensions[column].width = adjusted_width
 
-        # Apply borders and alignment to all data cells
         for row in worksheet.iter_rows(
             min_row=2,
             max_row=worksheet.max_row,
@@ -327,20 +324,17 @@ def save_to_pretty_excel(df: pd.DataFrame, output_path: str) -> None:
         ):
             for cell in row:
                 cell.border = thin_border
-                # Right-align numeric columns (columns after Employment Basis)
                 if cell.column > 6:
                     cell.alignment = Alignment(horizontal="right", vertical="center")
                 else:
                     cell.alignment = Alignment(horizontal="left", vertical="center")
 
-        # Style the total row (last row)
         total_row_num = worksheet.max_row
         for cell in worksheet[total_row_num]:
             cell.font = total_font
             cell.fill = total_fill
             cell.border = thin_border
 
-        # Create an Excel Table for filters and searchability
         tab = Table(
             displayName="SalaryTable", ref=f"A1:{worksheet.dimensions.split(':')[1]}"
         )
@@ -359,12 +353,14 @@ def save_to_pretty_excel(df: pd.DataFrame, output_path: str) -> None:
         logger.info("✅ SUCCESS! Extracted data saved to: %s", output_path)
         logger.info("=" * 60)
 
-    except Exception as e:
+    except (FileNotFoundError, PermissionError, ValueError) as e:
         logger.error("Error saving to Excel %s: %s", output_path, str(e))
         raise
 
 
-def main(pdf_folder: str, output_excel: str = "salary_slips_flattened.xlsx") -> None:
+def main(
+    pdf_folder: str = "salary_slips", output_excel: str = "salary_slips_flattened.xlsx"
+) -> None:
     """
     Main function to extract data from PDFs and save to a formatted Excel file.
 
@@ -375,7 +371,19 @@ def main(pdf_folder: str, output_excel: str = "salary_slips_flattened.xlsx") -> 
     logger.info("SALARY SLIP EXTRACTOR - STARTED")
     logger.info("=" * 60)
     logger.info("Input folder: %s", pdf_folder)
-    logger.info("Output file: %s", output_excel)
+
+    # Ensure output directory exists
+    output_dir = "output"
+    try:
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            logger.info("Created output directory: %s", output_dir)
+    except (FileNotFoundError, PermissionError) as e:
+        logger.error("Error creating output directory %s: %s", output_dir, str(e))
+        raise
+
+    output_path = os.path.join(output_dir, output_excel)
+    logger.info("Output file: %s", output_path)
     logger.info("Using pymupdf4llm for PDF to Markdown conversion")
 
     try:
@@ -383,23 +391,21 @@ def main(pdf_folder: str, output_excel: str = "salary_slips_flattened.xlsx") -> 
         extractor.process_all_pdfs()
         df = extractor.get_dataframe()
 
-        # Display summary
         logger.info("\n" + "=" * 60)
         logger.info("EXTRACTION SUMMARY")
         logger.info("=" * 60)
         logger.info("Total records extracted: %d", len(df))
 
         df_with_totals = add_totals_to_dataframe(df)
-        save_to_pretty_excel(df_with_totals, output_excel)
+        save_to_pretty_excel(df_with_totals, output_path)
 
         logger.info("\n✅ PROCESS COMPLETED SUCCESSFULLY!")
         logger.info("=" * 60)
 
-    except Exception as e:
-        logger.error("\n❌ PROCESS FAILED: %s", str(e), exc_info=True)
+    except (ValueError, FileNotFoundError, PermissionError) as e:
+        logger.error("❌ PROCESS FAILED: %s", str(e), exc_info=True)
         raise
 
 
 if __name__ == "__main__":
-    # Update this path to your PDF folder
-    main("C:/Users/Administrator/Desktop/Salary slips")
+    main("salary_slips")
